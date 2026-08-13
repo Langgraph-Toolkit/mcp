@@ -39,7 +39,7 @@ export type McpDatabaseQueryResult = JsonObject & {
 /** Configuration shared by the typed schema and query tool wrappers. */
 export interface McpDatabaseToolOptions {
   readonly server: string;
-  readonly dialect: McpDatabaseSchema["dialect"];
+  readonly dialect?: McpDatabaseSchema["dialect"];
   readonly allowedTables: readonly string[];
   readonly maxRows: number;
 }
@@ -95,7 +95,11 @@ function parseSchema(value: JsonObject, dialect: McpDatabaseSchema["dialect"]): 
     });
     return { name: asString(table.name, "table.name"), columns } satisfies McpDatabaseSchemaTable;
   });
-  return { dialect, tables };
+  return { dialect: isDialect(value.dialect) ? value.dialect : dialect, tables };
+}
+
+function isDialect(value: JsonValue): value is McpDatabaseSchema["dialect"] {
+  return value === "memory" || value === "postgres" || value === "mysql" || value === "sqlite" || value === "mongodb";
 }
 
 function parseRow(value: JsonValue, index: number): McpDatabaseRow {
@@ -167,7 +171,7 @@ export function createDatabaseMcpTools(gateway: McpGateway, options: McpDatabase
       if (response.isError || response.structuredContent === undefined) {
         throw new Error(`MCP schema discovery failed on ${options.server}`);
       }
-      return parseSchema(response.structuredContent, options.dialect);
+      return parseSchema(response.structuredContent, options.dialect ?? "memory");
     },
   });
 
@@ -192,7 +196,7 @@ export function createDatabaseMcpTools(gateway: McpGateway, options: McpDatabase
       };
     }),
     async execute(args) {
-      if (args.table !== undefined && !options.allowedTables.includes(args.table)) {
+      if (args.table !== undefined && options.allowedTables.length > 0 && !options.allowedTables.includes(args.table)) {
         throw new Error(`Table is not allowed: ${args.table}`);
       }
       const response = await gateway.callTool("execute_query", {

@@ -396,3 +396,4 @@ export function createMcpApplication(options: McpApplicationOptions): McpApplica
 }
 
 export * from "./database.js";
+export * from "./database-agent.js";

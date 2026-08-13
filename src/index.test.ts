@@ -4,6 +4,7 @@ import {
   McpError,
   McpServerRegistry,
   createDatabaseMcpTools,
+  createDatabaseMcpAgent,
   createMcpGateway,
   createMemoryDatabaseMcpGateway,
   fromMcpCredentials,
@@ -123,5 +124,24 @@ describe("MCP declarations", () => {
       limit: 1,
       sql: "select * from users",
     }, toolContext)).rejects.toThrowError(/not allowed/);
+  });
+
+  it("runs the zero-config database agent through MCP schema and query tools", async () => {
+    const agent = await createDatabaseMcpAgent({
+      rows: [
+        { id: "course-1", table: "courses", title: "TypeScript", price: 0 },
+        { id: "course-2", table: "courses", title: "SQL", price: 35000 },
+      ],
+      policy: { allowedTables: ["courses"], approvalRequired: false },
+    });
+
+    const result = await agent.run({ question: "How many courses are available?" }, { threadId: "mcp-agent-test" });
+
+    expect(result.stoppedReason).toBe("done");
+    expect(result.output?.grounded).toBe(true);
+    expect(result.output?.rowCount).toBe(2);
+    expect(result.state.schema?.tables.map((table) => table.name)).toEqual(["courses"]);
+    expect(result.state.audit[0]?.datasource).toBe("database");
+    await agent.close();
   });
 });
