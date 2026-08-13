@@ -323,7 +323,74 @@ export class McpServerRegistry {
     return declaration;
   }
 
+  /** Return the names of all declaratively registered MCP servers. */
+  list(): readonly string[] {
+    return Array.from(this.declarations.keys());
+  }
+
   async connect(name: string, context: McpRequestContext = {}): Promise<McpGateway> {
     return createMcpGateway(this.get(name), context);
   }
+}
+
+/** Configuration for an application-level MCP composition layer. */
+export interface McpApplicationOptions {
+  /** Declarative servers available to graph resources. Connections are lazy. */
+  readonly servers: readonly McpServerDeclaration[];
+  /** Base context merged into every connection request. */
+  readonly context?: McpRequestContext;
+}
+
+/** Cached MCP gateways and their lifecycle boundary for one host process. */
+export interface McpApplication {
+  readonly servers: McpServerRegistry;
+  readonly listServers: () => readonly string[];
+  readonly gateway: (name: string, context?: McpRequestContext) => Promise<McpGateway>;
+  readonly close: () => Promise<void>;
+}
+
+function mergeRequestContext(base: McpRequestContext, next: McpRequestContext): McpRequestContext {
+  return {
+    actor: next.actor ?? base.actor,
+    threadId: next.threadId ?? base.threadId,
+    runId: next.runId ?? base.runId,
+    tenantId: next.tenantId ?? base.tenantId,
+    variables: { ...(base.variables ?? {}), ...(next.variables ?? {}) },
+    global: { ...(base.global ?? {}), ...(next.global ?? {}) },
+  };
+}
+
+/**
+ * Compose multiple MCP declarations into one lazy, cached application service.
+ *
+ * This is the recommended boundary for examples and host applications. It
+ * keeps credential resolution asynchronous, avoids one connection per tool
+ * call, and gives the host one close operation for graceful shutdown.
+ */
+export function createMcpApplication(options: McpApplicationOptions): McpApplication {
+  const servers = new McpServerRegistry();
+  for (const declaration of options.servers) servers.add(declaration);
+
+  const gateways = new Map<string, Promise<McpGateway>>();
+  const gateway = (name: string, context: McpRequestContext = {}): Promise<McpGateway> => {
+    const mergedContext = mergeRequestContext(options.context ?? {}, context);
+    const current = gateways.get(name);
+    if (current !== undefined) return current;
+    const connection = servers.connect(name, mergedContext);
+    gateways.set(name, connection);
+    return connection;
+  };
+
+  return {
+    servers,
+    listServers: () => servers.list(),
+    gateway,
+    close: async () => {
+      const connections = await Promise.allSettled(gateways.values());
+      for (const connection of connections) {
+        if (connection.status === "fulfilled") await connection.value.close();
+      }
+      gateways.clear();
+    },
+  };
 }
