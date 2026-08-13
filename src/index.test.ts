@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   McpError,
   McpServerRegistry,
+  createDatabaseMcpTools,
   createMcpGateway,
+  createMemoryDatabaseMcpGateway,
   fromMcpCredentials,
   fromMcpEnv,
   type McpStringMap,
@@ -82,5 +84,44 @@ describe("MCP declarations", () => {
     registry.add(declaration);
     expect(() => registry.add(declaration)).toThrowError(/already registered/);
     expect(() => registry.get("missing")).toThrowError(/not registered/);
+  });
+
+  it("normalizes generic database rows and enforces query boundaries", async () => {
+    const gateway = createMemoryDatabaseMcpGateway([
+      { id: "doc-1", table: "documents", title: "Refund policy", category: "billing" },
+      { id: "doc-2", table: "documents", title: "Returns", category: "billing" },
+    ]);
+    const tools = createDatabaseMcpTools(gateway, {
+      server: "database",
+      dialect: "memory",
+      allowedTables: ["documents"],
+      maxRows: 1,
+    });
+    const toolContext = { threadId: "test-thread", runId: "test-run", variables: {}, global: {} };
+
+    const discovered = await tools.schemaTool.execute({}, toolContext);
+    expect(discovered.tables[0]?.columns.map((column) => column.name)).toEqual([
+      "id",
+      "table",
+      "title",
+      "category",
+    ]);
+
+    const result = await tools.executeQueryTool.execute({
+      queryId: "query-1",
+      query: "refund",
+      table: "documents",
+      limit: 10,
+      sql: "select * from documents",
+    }, toolContext);
+    expect(result.rows).toHaveLength(1);
+    expect(result.rows[0]?.title).toBe("Refund policy");
+    await expect(tools.executeQueryTool.execute({
+      queryId: "query-2",
+      query: "refund",
+      table: "users",
+      limit: 1,
+      sql: "select * from users",
+    }, toolContext)).rejects.toThrowError(/not allowed/);
   });
 });

@@ -394,3 +394,5 @@ export function createMcpApplication(options: McpApplicationOptions): McpApplica
     },
   };
 }
+
+export * from "./database.js";
