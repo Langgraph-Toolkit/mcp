@@ -1,4 +1,4 @@
-# @langgraph/toolkit-mcp
+# @langgraph-toolkit/mcp
 
 Typed, framework-agnostic MCP client integration for Langgraph-Toolkit. The package keeps MCP transport and credential resolution outside the core graph runtime while exposing a small gateway contract that graph nodes can call.
 
@@ -7,7 +7,7 @@ Typed, framework-agnostic MCP client integration for Langgraph-Toolkit. The pack
 Credentials may come from environment variables, a database-backed loader, a secret manager, or application code. The loader receives request context for tenant, actor, thread, variables, and global configuration.
 
 ```ts
-import { createMcpGateway, fromMcpCredentials } from "@langgraph/toolkit-mcp";
+import { createMcpGateway, fromMcpCredentials } from "@langgraph-toolkit/mcp";
 
 const gateway = await createMcpGateway({
   name: "analytics",

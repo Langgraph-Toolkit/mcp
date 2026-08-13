@@ -4,7 +4,7 @@ import {
   StreamableHTTPClientTransport,
 } from "@modelcontextprotocol/client";
 import type { Transport } from "@modelcontextprotocol/client";
-import type { Actor, JsonObject, JsonValue } from "@langgraph/toolkit";
+import type { Actor, JsonObject, JsonValue } from "@langgraph-toolkit/core";
 
 /** A string-only map suitable for HTTP headers or child-process environment values. */
 export type McpStringMap = Readonly<Record<string, string>>;

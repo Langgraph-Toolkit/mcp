@@ -1,5 +1,5 @@
 {
-  "name": "@langgraph/toolkit-mcp",
+  "name": "@langgraph-toolkit/mcp",
   "version": "0.1.0",
   "description": "Typed MCP client integration for Langgraph-Toolkit with async credentials and framework-agnostic execution.",
   "type": "module",
@@ -17,7 +17,7 @@
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
-    "@langgraph/toolkit": "0.1.0",
+    "@langgraph-toolkit/core": "0.1.0",
     "@modelcontextprotocol/client": "^2.0.0"
   },
   "devDependencies": {
