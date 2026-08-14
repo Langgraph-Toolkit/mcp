@@ -4,7 +4,13 @@ import {
   StreamableHTTPClientTransport,
 } from "@modelcontextprotocol/client";
 import type { Transport } from "@modelcontextprotocol/client";
-import type { Actor, JsonObject, JsonValue } from "@langgraph-toolkit/core";
+import type {
+  Actor,
+  JsonObject,
+  JsonValue,
+  ToolDefinition,
+  ValueSchema,
+} from "@langgraph-toolkit/core";
 
 /** A string-only map suitable for HTTP headers or child-process environment values. */
 export type McpStringMap = Readonly<Record<string, string>>;
@@ -129,6 +135,60 @@ export interface McpGateway {
   listResources(): Promise<readonly McpResourceDescriptor[]>;
   readResource(uri: string): Promise<JsonValue>;
   close(): Promise<void>;
+}
+
+/** Options for adapting one MCP descriptor into a typed graph tool. */
+export interface McpToolAdapterOptions<TArgs extends JsonObject, TResult extends JsonValue> {
+  readonly gateway: McpGateway;
+  readonly descriptor: McpToolDescriptor;
+  readonly input?: ValueSchema<TArgs>;
+  readonly output: (result: McpToolResult) => TResult;
+}
+
+/** A typed MCP tool that preserves gateway errors and emits core tool lifecycle events when called by a node. */
+export function createMcpTool<TArgs extends JsonObject, TResult extends JsonValue>(
+  options: McpToolAdapterOptions<TArgs, TResult>,
+): ToolDefinition<TArgs, TResult> {
+  const input: ValueSchema<TArgs> = options.input ?? {
+    name: `${options.descriptor.name}.input`,
+    parse: (value) => {
+      if (!isJsonObject(value)) {
+        throw new McpError(
+          `MCP tool "${options.descriptor.name}" expects an object input.`,
+          "MCP_PROTOCOL_ERROR",
+          options.gateway.server,
+        );
+      }
+      return value as TArgs;
+    },
+  };
+  return {
+    name: options.descriptor.name,
+    description: options.descriptor.description,
+    input,
+    execute: async (args) => {
+      const result = await options.gateway.callTool(options.descriptor.name, args);
+      if (result.isError) {
+        throw new McpError(
+          `MCP tool "${options.descriptor.name}" returned an error.`,
+          "MCP_TOOL_ERROR",
+          options.gateway.server,
+        );
+      }
+      return options.output(result);
+    },
+  };
+}
+
+/** Convert structured MCP output into bounded prompt context without app-specific JSON handling. */
+export function formatMcpContext(result: McpToolResult, maxChars = 12_000): string {
+  return formatMcpContextValue(result.structuredContent ?? result.content, maxChars);
+}
+
+/** Convert a typed MCP tool value into bounded prompt context. */
+export function formatMcpContextValue(value: JsonValue, maxChars = 12_000): string {
+  const encoded = JSON.stringify(value);
+  return (encoded ?? "").slice(0, Math.max(1, maxChars));
 }
 
 /** MCP integration errors with stable codes for graph policies and HTTP adapters. */

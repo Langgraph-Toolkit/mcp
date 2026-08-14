@@ -44,6 +44,38 @@ const result = await gateway.callTool("execute_query", {
 await gateway.close();
 ```
 
+## Wrap one discovered tool once
+
+`createMcpTool` keeps the tool name, typed argument boundary, default object validation, gateway error propagation, and context formatting outside graph nodes. The graph receives a callable typed tool instead of repeating `callTool()` and result parsing.
+
+```ts
+import {
+  createMcpTool,
+  formatMcpContext,
+} from "@langgraph-toolkit/mcp";
+
+type SearchArgs = { query: string; limit?: number };
+
+const search = createMcpTool<SearchArgs, JsonValue>({
+  gateway,
+  name: "search_courses",
+});
+
+const context = await search({ query: "testing", limit: 3 });
+const promptContext = formatMcpContext(context);
+```
+
+`createMcpApplication` is the process-level composition boundary when an application owns several lazily-created gateways. It caches the gateway, exposes one close hook for framework lifecycle, and keeps credential resolution out of graph code.
+
+```ts
+const application = await createMcpApplication({
+  servers: [analyticsDeclaration],
+});
+
+const analytics = await application.gateway("analytics");
+await application.close();
+```
+
 Use `fromMcpEnv` when process-level environment variables are enough. Use the async resolver when credentials depend on tenant, actor, secret-manager, or database state.
 
 ## Zero-config database agent
