@@ -1,35 +1,110 @@
 # @langgraph-toolkit/mcp
 
-Typed, framework-agnostic MCP client integration for Langgraph-Toolkit. The package keeps MCP transport and credential resolution outside the core graph runtime while exposing a small gateway contract that graph nodes can call.
+Typed MCP gateway and database-agent composition for Langgraph-Toolkit. The package is framework agnostic. It can be used from a worker, a CLI, an HTTP server, or a graph adapter without importing Express, Fastify, NestJS, or StruxJS.
 
-## Async credentials
+## Install
 
-Credentials may come from environment variables, a database-backed loader, a secret manager, or application code. The loader receives request context for tenant, actor, thread, variables, and global configuration.
+```bash
+npm install @langgraph-toolkit/mcp
+```
+
+MCP uses `@langgraph-toolkit/core` for graph contracts. It does not install community providers or host-framework adapters. Those are optional application packages.
+
+## Gateway with async credentials
+
+Credentials can come from environment variables, a database, a secret manager, or an application-owned resolver. The resolver is asynchronous and receives request context.
 
 ```ts
-import { createMcpGateway, fromMcpCredentials } from "@langgraph-toolkit/mcp";
+import {
+  createMcpGateway,
+  fromMcpCredentials,
+} from "@langgraph-toolkit/mcp";
 
 const gateway = await createMcpGateway({
   name: "analytics",
-  transport: { kind: "streamable-http", url: "https://mcp.example.com/mcp" },
+  transport: {
+    kind: "streamable-http",
+    url: process.env.ANALYTICS_MCP_URL ?? "http://localhost:8811/mcp",
+  },
   credentials: fromMcpCredentials(async ({ tenantId }) => ({
     headers: {
       Authorization: `Bearer ${await secretStore.tokenForTenant(tenantId ?? "public")}`,
     },
   })),
-}, { actor, tenantId, threadId });
+}, { tenantId: "public" });
 
 const tools = await gateway.listTools();
-const result = await gateway.callTool("execute_query", { sql: "SELECT 1" });
+const result = await gateway.callTool("execute_query", {
+  sql: "select count(*) from users",
+});
+
 await gateway.close();
 ```
 
-For environment-backed credentials, use `fromMcpEnv`. No database driver is required by this package.
+Use `fromMcpEnv` when a process-level environment variable is enough. Do not pass secrets through graph input or client requests.
 
-## Transport declarations
+## Database MCP agent
 
-`streamable-http` is the preferred transport for modern MCP servers. `sse` is available for legacy servers. Use `custom` when the application owns a transport, such as a process transport, in-memory test transport, or a framework-specific authenticated channel.
+`createDatabaseMcpAgent` composes schema discovery, read-only query execution, policy checks, approval interrupts, and typed stream events. A developer supplies the MCP gateway and can leave policy values empty when the gateway itself defines its allowed surface.
 
-## Policy boundary
+```ts
+import {
+  createDatabaseMcpAgent,
+  createDatabaseMcpDefinition,
+} from "@langgraph-toolkit/mcp";
 
-`allowedTools` and `allowedResources` are enforced before calls leave the gateway. Application code should still enforce actor, tenant, SQL, and data classification policy in the graph or MCP server. The gateway normalizes tool and resource responses to the toolkit JSON contracts and wraps connection, protocol, permission, and tool failures in `McpError`.
+const agent = await createDatabaseMcpAgent({
+  mcp: gateway,
+  policy: {
+    allowedTables: ["users", "courses"],
+  },
+});
+
+const answer = await agent.run({
+  question: "How many users are there?",
+});
+
+for await (const event of agent.stream({
+  question: "How many courses are there?",
+})) {
+  console.log(event.type, event);
+}
+
+const definition = createDatabaseMcpDefinition({
+  mcp: gateway,
+});
+```
+
+The definition bridge is synchronous so scanner-based adapters can register it without hiding asynchronous gateway initialization inside framework bootstrap code.
+
+## Transport boundary
+
+The gateway supports `streamable-http`, legacy `sse`, and application-owned `custom` transports. A custom transport is useful for an in-memory test gateway, process transport, or framework-specific authenticated channel.
+
+The gateway owns protocol normalization and tool/resource errors. The graph or host application owns actor authorization, tenant isolation, SQL classification, and data retention rules.
+
+## Package boundary
+
+```text
+core
+└── mcp
+    ├── gateway and transport contracts
+    ├── database tools and memory gateway
+    └── optional database graph agent
+```
+
+MCP can be installed without the community package. It can run with a custom gateway and a mock model or with an application-owned model resolver. Community providers are a separate package and are not required for gateway-only use.
+
+## Testing
+
+```bash
+npm install
+npm run build
+npm test
+```
+
+Contributor tests should cover tool listing, schema discovery, query rejection, approval interrupt, resume, final stream event preservation, async credential resolution, and gateway close behavior.
+
+## License
+
+MIT
