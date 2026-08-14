@@ -1,16 +1,23 @@
 import type { JSONRPCMessage, Transport } from "@modelcontextprotocol/client";
 import { describe, expect, it } from "vitest";
 import {
+  createMCP,
+  createMCPAgent,
   McpError,
-  McpServerRegistry,
-  createDatabaseMcpTools,
-  createDatabaseMcpAgent,
-  createMcpGateway,
-  createMemoryDatabaseMcpGateway,
   fromMcpCredentials,
   fromMcpEnv,
+  useDatabase,
+  useStreamableHttp,
   type McpStringMap,
 } from "./index.js";
+import {
+  McpServerRegistry,
+  createMcpConnector,
+  createMcpGateway,
+  type McpConnector,
+  type McpGateway,
+} from "./advanced.js";
+import type { ChatMessage, ChatResult, LLMSession, JsonObject, JsonValue } from "@langgraph-toolkit/core";
 
 class FailingTransport implements Transport {
   onclose?: () => void;
@@ -87,61 +94,87 @@ describe("MCP declarations", () => {
     expect(() => registry.get("missing")).toThrowError(/not registered/);
   });
 
-  it("normalizes generic database rows and enforces query boundaries", async () => {
-    const gateway = createMemoryDatabaseMcpGateway([
-      { id: "doc-1", table: "documents", title: "Refund policy", category: "billing" },
-      { id: "doc-2", table: "documents", title: "Returns", category: "billing" },
-    ]);
-    const tools = createDatabaseMcpTools(gateway, {
-      server: "database",
-      dialect: "memory",
-      allowedTables: ["documents"],
-      maxRows: 1,
-    });
-    const toolContext = { threadId: "test-thread", runId: "test-run", variables: {}, global: {} };
-
-    const discovered = await tools.schemaTool.execute({}, toolContext);
-    expect(discovered.tables[0]?.columns.map((column) => column.name)).toEqual([
-      "id",
-      "table",
-      "title",
-      "category",
-    ]);
-
-    const result = await tools.executeQueryTool.execute({
-      queryId: "query-1",
-      query: "refund",
-      table: "documents",
-      limit: 10,
-      sql: "select * from documents",
-    }, toolContext);
-    expect(result.rows).toHaveLength(1);
-    expect(result.rows[0]?.title).toBe("Refund policy");
-    await expect(tools.executeQueryTool.execute({
-      queryId: "query-2",
-      query: "refund",
-      table: "users",
-      limit: 1,
-      sql: "select * from users",
-    }, toolContext)).rejects.toThrowError(/not allowed/);
-  });
-
-  it("runs the zero-config database agent through MCP schema and query tools", async () => {
-    const agent = await createDatabaseMcpAgent({
-      rows: [
-        { id: "course-1", table: "courses", title: "TypeScript", price: 0 },
-        { id: "course-2", table: "courses", title: "SQL", price: 35000 },
+  it("composes multiple MCP servers without connecting eagerly", async () => {
+    let connectionAttempts = 0;
+    const connector = createMcpConnector({
+      servers: [
+        {
+          name: "context",
+          transport: { kind: "custom", create: async () => { connectionAttempts += 1; throw new Error("lazy"); } },
+        },
+        {
+          name: "search",
+          transport: { kind: "custom", create: async () => { connectionAttempts += 1; throw new Error("lazy"); } },
+        },
       ],
-      policy: { allowedTables: ["courses"], approvalRequired: false },
     });
 
-    const result = await agent.run({ question: "How many courses are available?" }, { threadId: "mcp-agent-test" });
-
-    expect(result.stoppedReason).toBe("done");
-    expect(result.output?.grounded).toBe(true);
-    expect(result.output?.rowCount).toBe(2);
-    expect(result.state.schema?.tables.map((table) => table.name)).toEqual(["courses"]);
-    expect(result.state.audit[0]?.datasource).toBe("database");
-    await agent.close();
+    expect(connector.list()).toEqual(["context", "search"]);
+    expect(connectionAttempts).toBe(0);
+    await connector.close();
   });
+
+  it("declares HTTP and database MCP servers without opening a connection", () => {
+    const http = useStreamableHttp("https://example.com/mcp", { name: "search" });
+    const database = useDatabase("postgres", "postgresql://localhost/app", {
+      name: "analytics",
+      readOnly: true,
+    });
+
+    expect(http).toMatchObject({
+      name: "search",
+      transport: { kind: "streamable-http", url: "https://example.com/mcp" },
+    });
+    expect(database).toMatchObject({
+      name: "analytics",
+      metadata: { type: "postgres", connectionString: "postgresql://localhost/app", readOnly: true },
+    });
+    expect(database.transport.kind).toBe("custom");
+  });
+
+  it("composes named servers and executes a generic MCP tool call", async () => {
+    const declaration = useStreamableHttp("https://example.com/mcp", { name: "context" });
+    const connector = createMCP({ servers: { context: declaration } });
+    expect(connector.list()).toEqual(["context"]);
+
+    const gateway: McpGateway = {
+      server: "context",
+      connect: async () => ({ lifecycle: "unknown", capabilities: {} }),
+      listTools: async () => [{ name: "lookup", description: "Look up a value", inputSchema: { type: "object" } }],
+      callTool: async (_name: string, _args: JsonObject) => ({
+        isError: false,
+        content: { value: "ready" },
+      }),
+      listResources: async () => [],
+      readResource: async (_uri: string): Promise<JsonValue> => null,
+      close: async () => undefined,
+    };
+    const fakeConnector: McpConnector = {
+      servers: new McpServerRegistry(),
+      list: () => ["context"],
+      server: async () => gateway,
+      gateway: async () => gateway,
+      close: async () => undefined,
+    };
+    const model: LLMSession = {
+      chat: async (messages: readonly ChatMessage[]): Promise<ChatResult> => {
+        if (messages.some((message) => message.role === "tool")) return { content: "The value is ready." };
+        return {
+          content: "",
+          toolCalls: [{ id: "call-1", name: "context.lookup", arguments: {} }],
+        };
+      },
+    };
+
+    const agent = createMCPAgent({ model, mcp: fakeConnector });
+    await expect(agent.discover()).resolves.toEqual([
+      { name: "context.lookup", description: "Look up a value", parameters: { type: "object" } },
+    ]);
+    await expect(agent.run([{ role: "user", content: "Check it" }])).resolves.toMatchObject({
+      message: { content: "The value is ready." },
+      rounds: 2,
+      toolCalls: [{ name: "context.lookup" }],
+    });
+  });
+
 });
