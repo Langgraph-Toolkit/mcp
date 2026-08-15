@@ -2,17 +2,21 @@
 
 **Connect a resource once, let the graph use it from any host.** MCP provides a typed gateway boundary for tools, resources, schema discovery, async credentials, and structured errors. It can be used from Core, a worker, a CLI, an HTTP server, or any framework adapter without importing Express, Fastify, NestJS, or StruxJS.
 
-## Install only the MCP boundary
+## Install the MCP gateway
 
 ```bash
 npm install @langgraph-toolkit/core @langgraph-toolkit/mcp
 ```
 
-MCP does not install community providers, framework adapters, or database clients. The application decides which optional boundary to add.
+MCP does not install model providers, framework adapters, or database clients. Add only the optional boundary your application uses. The `autoModel()` quickstart below uses Community provider inference, so install it as well:
+
+```bash
+npm install @langgraph-toolkit/community
+```
 
 ## Canonical zero-config facade
 
-The root package keeps the common path small. `useStreamableHttp()` declares a lazy remote server, `createMCP()` composes one or more named servers, and `createMCPAgent()` provides a generic model-plus-tools loop. None of these APIs knows about SQL, rows, approval terminology, or a framework host.
+The root package keeps the common path small. `useStreamableHttp()` declares a lazy remote server, `useMCPServer()` declares an application-owned or asynchronous server, `createMCP()` composes one or more named servers, and `createMCPAgent()` provides a generic model-plus-tools loop. None of these APIs knows about SQL, rows, approval terminology, or a framework host.
 
 ```ts
 import { createMCP, createMCPAgent, useStreamableHttp } from "@langgraph-toolkit/mcp";
@@ -37,6 +41,8 @@ const result = await agent.run([{ role: "user", content: "Find the latest releas
 await agent.close();
 ```
 
+The aggregate `MCPClient` contract exposes `discover`, `callTool`, `readResource`, and `getPrompt` across named servers. `MCPDiscovery`, `MCPDiscoveryServer`, and `McpPromptDescriptor` describe discovery and prompt lifecycle without forcing a specific transport.
+
 ## Async credentials with no graph pollution
 
 Credentials may come from environment variables, a database, a secret manager, or an application-owned resolver. Resolution is asynchronous and happens at the gateway boundary. Secrets never need to become graph input.
@@ -44,6 +50,12 @@ Credentials may come from environment variables, a database, a secret manager, o
 ```ts
 import { fromMcpCredentials } from "@langgraph-toolkit/mcp";
 import { createMCP, useStreamableHttp } from "@langgraph-toolkit/mcp";
+
+type SecretStore = {
+  tokenForTenant(tenantId: string): Promise<string>;
+};
+
+declare const secretStore: SecretStore;
 
 const mcp = createMCP({
   servers: {
@@ -70,6 +82,8 @@ const result = await gateway.callTool("execute_query", {
 
 await gateway.close();
 ```
+
+For credentials that depend on a request or tenant, the resolver receives typed request context. The resulting connector can be closed once by the owning resource; a controller should not rebuild it for each request.
 
 ## Wrap one discovered tool once
 

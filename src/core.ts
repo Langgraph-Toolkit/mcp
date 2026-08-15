@@ -94,6 +94,7 @@ export interface McpServerDeclaration {
   readonly metadata?: JsonObject;
   readonly allowedTools?: readonly string[];
   readonly allowedResources?: readonly string[];
+  readonly allowedPrompts?: readonly string[];
   readonly connectTimeoutMs?: number;
 }
 
@@ -110,6 +111,17 @@ export interface McpResourceDescriptor {
   readonly name?: string;
   readonly description?: string;
   readonly mimeType?: string;
+}
+
+/** A normalized prompt descriptor independent of the MCP SDK response shape. */
+export interface McpPromptDescriptor {
+  readonly name: string;
+  readonly description?: string;
+  readonly arguments?: readonly {
+    readonly name: string;
+    readonly description?: string;
+    readonly required?: boolean;
+  }[];
 }
 
 /** A structured result from an MCP tool invocation. */
@@ -136,7 +148,39 @@ export interface McpGateway {
   callTool(name: string, args: JsonObject): Promise<McpToolResult>;
   listResources(): Promise<readonly McpResourceDescriptor[]>;
   readResource(uri: string): Promise<JsonValue>;
+  listPrompts?(): Promise<readonly McpPromptDescriptor[]>;
+  getPrompt?(name: string, args: JsonObject): Promise<JsonValue>;
   close(): Promise<void>;
+}
+
+/** Options for selecting servers and capability families during discovery. */
+export interface DiscoverOptions {
+  readonly servers?: readonly string[];
+  readonly tools?: boolean;
+  readonly resources?: boolean;
+  readonly prompts?: boolean;
+}
+
+/** Aggregated discovery result for one or more MCP servers. */
+export interface MCPDiscoveryServer {
+  readonly name: string;
+  readonly discovery: McpDiscovery;
+  readonly tools: readonly McpToolDescriptor[];
+  readonly resources: readonly McpResourceDescriptor[];
+  readonly prompts: readonly McpPromptDescriptor[];
+}
+
+/** Normalized, multi-server MCP capability inventory. */
+export interface MCPDiscovery {
+  readonly servers: readonly MCPDiscoveryServer[];
+}
+
+/** Root client contract for generic MCP tool, resource, and prompt orchestration. */
+export interface MCPClient {
+  discover(options?: DiscoverOptions): Promise<MCPDiscovery>;
+  callTool<TArgs extends object, TResult extends JsonValue>(name: string, args: TArgs): Promise<TResult>;
+  readResource<TValue extends JsonValue>(uri: string): Promise<TValue>;
+  getPrompt<TInput extends object, TValue extends JsonValue>(name: string, input: TInput): Promise<TValue>;
 }
 
 /** Options for adapting one MCP descriptor into a typed graph tool. */
@@ -221,6 +265,14 @@ function asJsonObject(value: object | undefined): JsonObject {
   return isJsonObject(normalized) ? normalized : {};
 }
 
+function asPromptArguments(value: JsonObject): Readonly<Record<string, string>> {
+  const output: Record<string, string> = {};
+  for (const [key, item] of Object.entries(value)) {
+    output[key] = typeof item === "string" ? item : JSON.stringify(item) ?? "";
+  }
+  return output;
+}
+
 function isJsonObject(value: JsonValue): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -229,7 +281,7 @@ function mergeHeaders(base: McpStringMap | undefined, credentials: McpCredential
   return { ...(base ?? {}), ...(credentials.headers ?? {}) };
 }
 
-function enforceAllowList(name: string, allowed: readonly string[] | undefined, kind: "tool" | "resource", server: string): void {
+function enforceAllowList(name: string, allowed: readonly string[] | undefined, kind: "tool" | "resource" | "prompt", server: string): void {
   if (allowed !== undefined && !allowed.includes(name)) {
     throw new McpError(`${kind} "${name}" is not allowed by server policy.`, "MCP_PERMISSION_ERROR", server);
   }
@@ -323,6 +375,35 @@ export class SdkMcpGateway implements McpGateway {
     }
   }
 
+  async listPrompts(): Promise<readonly McpPromptDescriptor[]> {
+    await this.ensureConnected();
+    try {
+      const result = await this.client.listPrompts();
+      return result.prompts.map((prompt) => ({
+        name: prompt.name,
+        description: prompt.description,
+        arguments: prompt.arguments?.map((argument) => ({
+          name: argument.name,
+          description: argument.description,
+          required: argument.required,
+        })),
+      }));
+    } catch (error) {
+      throw this.toolError("Failed to list MCP prompts.", error instanceof Error ? error : undefined);
+    }
+  }
+
+  async getPrompt(name: string, args: JsonObject): Promise<JsonValue> {
+    await this.ensureConnected();
+    enforceAllowList(name, this.declaration.allowedPrompts, "prompt", this.declaration.name);
+    try {
+      const result = await this.client.getPrompt({ name, arguments: asPromptArguments(args) });
+      return asExternalObject(result.messages as object);
+    } catch (error) {
+      throw this.toolError(`MCP prompt "${name}" failed.`, error instanceof Error ? error : undefined);
+    }
+  }
+
   async close(): Promise<void> {
     if (!this.transport) return;
     await this.client.close();
@@ -407,6 +488,7 @@ export interface McpConnectorOptions {
 
 /** Cached MCP gateways and their lifecycle boundary for one host process. */
 export interface McpConnector {
+  readonly client: MCPClient;
   readonly servers: McpServerRegistry;
   readonly list: () => readonly string[];
   readonly server: (name: string, context?: McpRequestContext) => Promise<McpGateway>;
@@ -451,7 +533,52 @@ export function createMcpConnector(options: McpConnectorOptions): McpConnector {
     return connection;
   };
 
+  const resolveServer = (qualifiedName: string): { readonly server: string; readonly name: string } => {
+    const separator = qualifiedName.indexOf(".");
+    if (separator > 0 && separator < qualifiedName.length - 1) {
+      return { server: qualifiedName.slice(0, separator), name: qualifiedName.slice(separator + 1) };
+    }
+    const names = servers.list();
+    if (names.length === 1 && names[0] !== undefined) return { server: names[0], name: qualifiedName };
+    throw new McpError(`MCP capability "${qualifiedName}" must use the server.name form.`, "MCP_CONFIG_ERROR", qualifiedName);
+  };
+
+  const client: MCPClient = {
+    discover: async (request = {}) => {
+      const names = request.servers ?? servers.list();
+      const entries: MCPDiscoveryServer[] = [];
+      for (const name of names) {
+        const current = await gateway(name);
+        const discovery = await current.connect();
+        const tools = request.tools === false ? [] : await current.listTools();
+        const resources = request.resources === false ? [] : await current.listResources();
+        const prompts = request.prompts === false || current.listPrompts === undefined ? [] : await current.listPrompts();
+        entries.push({ name, discovery, tools, resources, prompts });
+      }
+      return { servers: entries };
+    },
+    callTool: async <TArgs extends object, TResult extends JsonValue>(name: string, args: TArgs): Promise<TResult> => {
+      const target = resolveServer(name);
+      const result = await gateway(target.server).then((current) => current.callTool(target.name, asJsonObject(args as object)));
+      if (result.isError) throw new McpError(`MCP tool "${name}" returned an error.`, "MCP_TOOL_ERROR", target.server);
+      return (result.structuredContent ?? result.content) as TResult;
+    },
+    readResource: async <TValue extends JsonValue>(uri: string): Promise<TValue> => {
+      const target = resolveServer(uri);
+      return await gateway(target.server).then((current) => current.readResource(target.name)) as TValue;
+    },
+    getPrompt: async <TInput extends object, TValue extends JsonValue>(name: string, input: TInput): Promise<TValue> => {
+      const target = resolveServer(name);
+      const current = await gateway(target.server);
+      if (current.getPrompt === undefined) {
+        throw new McpError(`MCP server "${target.server}" does not expose prompts.`, "MCP_PROTOCOL_ERROR", target.server);
+      }
+      return await current.getPrompt(target.name, asJsonObject(input as object)) as TValue;
+    },
+  };
+
   return {
+    client,
     servers,
     list: () => servers.list(),
     server: gateway,

@@ -7,6 +7,7 @@ import {
   fromMcpCredentials,
   fromMcpEnv,
   useDatabase,
+  useMCPServer,
   useStreamableHttp,
   type McpStringMap,
 } from "./index.js";
@@ -132,6 +133,24 @@ describe("MCP declarations", () => {
     expect(database.transport.kind).toBe("custom");
   });
 
+  it("declares a generic MCP server with prompt permissions", () => {
+    const declaration = useMCPServer({
+      name: "assistant",
+      url: "https://example.com/mcp",
+      allowedTools: ["search"],
+      allowedResources: ["docs://guide"],
+      allowedPrompts: ["summarize"],
+    });
+
+    expect(declaration).toMatchObject({
+      name: "assistant",
+      transport: { kind: "streamable-http", url: "https://example.com/mcp" },
+      allowedTools: ["search"],
+      allowedResources: ["docs://guide"],
+      allowedPrompts: ["summarize"],
+    });
+  });
+
   it("composes named servers and executes a generic MCP tool call", async () => {
     const declaration = useStreamableHttp("https://example.com/mcp", { name: "context" });
     const connector = createMCP({ servers: { context: declaration } });
@@ -150,6 +169,14 @@ describe("MCP declarations", () => {
       close: async () => undefined,
     };
     const fakeConnector: McpConnector = {
+      client: {
+        discover: async () => ({ servers: [] }),
+        callTool: async <TArgs extends object, TResult extends JsonValue>(_name: string, _args: TArgs): Promise<TResult> => {
+          return (await gateway.callTool("lookup", {})).content as TResult;
+        },
+        readResource: async <TValue extends JsonValue>(_uri: string): Promise<TValue> => await gateway.readResource("context://empty") as TValue,
+        getPrompt: async <TInput extends object, TValue extends JsonValue>(_name: string, _input: TInput): Promise<TValue> => null as TValue,
+      },
       servers: new McpServerRegistry(),
       list: () => ["context"],
       server: async () => gateway,

@@ -6,12 +6,13 @@
  * subpaths.
  */
 
-export { createMCP, useDatabase, useStreamableHttp } from "./facades.js";
+export { createMCP, useDatabase, useMCPServer, useStreamableHttp } from "./facades.js";
 export { createMCPAgent } from "./agent.js";
 export { fromMcpCredentials, fromMcpEnv, McpError } from "./core.js";
 
 export type {
   MCPOptions,
+  MCPServerOptions,
   DatabaseOptions,
   DatabaseType,
   StreamableHttpOptions,
@@ -26,10 +27,15 @@ export type {
 } from "./agent.js";
 export type {
   McpConnector as MCP,
+  DiscoverOptions,
+  MCPClient,
+  MCPDiscovery,
+  MCPDiscoveryServer,
   McpCredentials,
   McpCredentialLoader,
   McpCredentialSource,
   McpGateway,
+  McpPromptDescriptor,
   McpRequestContext,
   McpServerDeclaration,
   McpStringMap,

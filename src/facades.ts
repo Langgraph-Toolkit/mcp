@@ -25,6 +25,7 @@ export interface StreamableHttpOptions {
   readonly credentials?: McpCredentialSource;
   readonly allowedTools?: readonly string[];
   readonly allowedResources?: readonly string[];
+  readonly allowedPrompts?: readonly string[];
   readonly clientName?: string;
   readonly clientVersion?: string;
 }
@@ -39,6 +40,43 @@ export function useStreamableHttp(url: string, options: StreamableHttpOptions = 
     credentials: options.credentials,
     allowedTools: options.allowedTools,
     allowedResources: options.allowedResources,
+    allowedPrompts: options.allowedPrompts,
+  };
+}
+
+/** Generic options for declaring one MCP server without constructing a transport client. */
+export interface MCPServerOptions {
+  readonly name?: string;
+  readonly url?: string;
+  readonly transport?: McpTransportDeclaration;
+  readonly headers?: McpStringMap;
+  readonly credentials?: McpCredentialSource;
+  readonly allowedTools?: readonly string[];
+  readonly allowedResources?: readonly string[];
+  readonly allowedPrompts?: readonly string[];
+  readonly clientName?: string;
+  readonly clientVersion?: string;
+}
+
+/** Declare a generic MCP server using Streamable HTTP or an explicitly supplied transport. */
+export function useMCPServer(options: MCPServerOptions): McpServerDeclaration {
+  if (options.transport === undefined && options.url === undefined) {
+    throw new McpError("useMCPServer requires options.url or options.transport.", "MCP_CONFIG_ERROR", options.name ?? "mcp-server");
+  }
+  const transport = options.transport ?? {
+    kind: "streamable-http" as const,
+    url: options.url as string,
+    headers: options.headers,
+  };
+  return {
+    name: options.name ?? "mcp-server",
+    clientName: options.clientName,
+    clientVersion: options.clientVersion,
+    transport,
+    credentials: options.credentials,
+    allowedTools: options.allowedTools,
+    allowedResources: options.allowedResources,
+    allowedPrompts: options.allowedPrompts,
   };
 }
 
@@ -55,6 +93,7 @@ export interface DatabaseOptions {
   readonly transport?: McpTransportDeclaration;
   readonly allowedTools?: readonly string[];
   readonly allowedResources?: readonly string[];
+  readonly allowedPrompts?: readonly string[];
 }
 
 /**
@@ -83,6 +122,7 @@ export function useDatabase(
     credentials: options.credentials,
     allowedTools: options.allowedTools,
     allowedResources: options.allowedResources,
+    allowedPrompts: options.allowedPrompts,
     metadata: {
       type,
       connectionString,
