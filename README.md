@@ -8,23 +8,27 @@
 npm install @langgraph-toolkit/core @langgraph-toolkit/mcp
 ```
 
-MCP does not install model providers, framework adapters, or database clients. Add only the optional boundary your application uses. The `autoModel()` quickstart below uses Community provider inference, so install it as well:
+MCP does not install model providers, framework adapters, or database clients. Add only the optional boundary your application uses. When an application needs a provider, install Community and declare its model configuration explicitly:
 
 ```bash
 npm install @langgraph-toolkit/community
 ```
 
-## Canonical zero-config facade
+## Canonical composition facade
 
 The root package keeps the common path small. `useStreamableHttp()` declares a lazy remote server, `useMCPServer()` declares an application-owned or asynchronous server, `createMCP()` composes one or more named servers, and `createMCPAgent()` provides a generic model-plus-tools loop. None of these APIs knows about SQL, rows, approval terminology, or a framework host.
 
 ```ts
 import { createMCP, createMCPAgent, useStreamableHttp } from "@langgraph-toolkit/mcp";
-import { autoModel } from "@langgraph-toolkit/community";
+import { createModelRegistry } from "@langgraph-toolkit/community";
+
+const models = createModelRegistry({
+  tiers: { smart: { fromEnvironment: true, temperature: 0.1 } },
+});
 
 const mcp = createMCP({
   servers: {
-    search: useStreamableHttp(process.env.SEARCH_MCP_URL ?? "http://localhost:8811/mcp"),
+    search: useStreamableHttp(undefined, { name: "search" }),
   },
   discover: true,
   discoverTools: true,
@@ -32,14 +36,16 @@ const mcp = createMCP({
 });
 
 const agent = createMCPAgent({
-  model: autoModel(),
+  model: models.model("smart"),
   mcp,
   name: "research-agent",
 });
 
-const result = await agent.run([{ role: "user", content: "Find the latest release notes." }]);
+const result = await agent.run({ query: "Find the latest release notes." });
 await agent.close();
 ```
+
+`fromEnvironment: true` retains explicit provider ownership while removing application parsing helpers: it reads `MODEL_DRIVER`, `MODEL_NAME`, `MODEL_API_KEY`, and optionally `MODEL_BASE_URL`. `useStreamableHttp(undefined)` reads `MCP_SERVER_URL`. Missing model configuration fails at bootstrap rather than selecting a hidden default.
 
 The aggregate `MCPClient` contract exposes `discover`, `callTool`, `readResource`, and `getPrompt` across named servers. `MCPDiscovery`, `MCPDiscoveryServer`, and `McpPromptDescriptor` describe discovery and prompt lifecycle without forcing a specific transport.
 
@@ -148,7 +154,7 @@ const mcp = createMCP({
 });
 ```
 
-For a ready-made database workflow, install `@langgraph-toolkit/community` and import the optional `createDatabaseAgent` preset from `@langgraph-toolkit/community/database`. For classification, background jobs, retrieval, or custom agents, compose the same connector with your own Core graph instead.
+`useDatabase()` is only a transport declaration. Applications that need data chat, retrieval, background tasks, classification, or custom agents compose their own visible Core graph and MCP-aware role agents. Neither MCP nor Community ships a database workflow preset.
 
 ## Same gateway, any host
 
@@ -175,7 +181,7 @@ core
     └── context: MCP value and prompt formatting
 ```
 
-MCP is independently useful with a custom gateway and deterministic model fallback. Community providers are optional.
+MCP is independently useful with a custom gateway and a caller-supplied model. Community providers are optional, and no provider or fallback model is selected implicitly.
 
 ## Development
 

@@ -8,6 +8,7 @@
 
 export { createMCP, useDatabase, useMCPServer, useStreamableHttp } from "./facades.js";
 export { createMCPAgent } from "./agent.js";
+export { discoverMcpTools, registerMcpTools } from "./tools.js";
 export { fromMcpCredentials, fromMcpEnv, McpError } from "./core.js";
 
 export type {
@@ -19,14 +20,13 @@ export type {
 } from "./facades.js";
 export type {
   McpAgent,
-  McpAgentChunk,
   McpAgentOptions,
-  McpAgentResult,
-  McpAgentRunOptions,
-  McpAgentTool,
+  McpAgentDiscoverOptions,
 } from "./agent.js";
 export type {
+  McpConnector,
   McpConnector as MCP,
+  McpConnectorSettings,
   DiscoverOptions,
   MCPClient,
   MCPDiscovery,
@@ -40,3 +40,4 @@ export type {
   McpServerDeclaration,
   McpStringMap,
 } from "./core.js";
+export type { DiscoverMcpToolsOptions } from "./tools.js";

@@ -1,6 +1,7 @@
 import type { JsonObject } from "@langgraph-toolkit/core";
 import type {
   McpConnector,
+  McpConnectorSettings,
   McpCredentialSource,
   McpServerDeclaration,
   McpStringMap,
@@ -31,12 +32,14 @@ export interface StreamableHttpOptions {
 }
 
 /** Declare a Streamable HTTP MCP server without constructing a client eagerly. */
-export function useStreamableHttp(url: string, options: StreamableHttpOptions = {}): McpServerDeclaration {
+export function useStreamableHttp(url?: string, options: StreamableHttpOptions = {}): McpServerDeclaration {
+  const resolvedUrl = url?.trim() || process.env.MCP_SERVER_URL?.trim();
+  if (!resolvedUrl) throw new McpError("useStreamableHttp requires a URL or MCP_SERVER_URL.", "MCP_CONFIG_ERROR", options.name ?? "mcp-server");
   return {
     name: options.name ?? "mcp-server",
     clientName: options.clientName,
     clientVersion: options.clientVersion,
-    transport: { kind: "streamable-http", url, headers: options.headers },
+    transport: { kind: "streamable-http", url: resolvedUrl, headers: options.headers },
     credentials: options.credentials,
     allowedTools: options.allowedTools,
     allowedResources: options.allowedResources,
@@ -156,5 +159,14 @@ export function createMCP(options: MCPOptions): McpConnector {
     servers,
     context: options.context,
     cache: options.cache,
+    settings: {
+      discover: options.discover,
+      discoverTools: options.discoverTools ?? options.discover,
+      discoverResources: options.discoverResources ?? options.discover,
+      discoverPrompts: options.discoverPrompts ?? options.discover,
+      routing: options.routing ?? "semantic",
+      permissions: options.permissions,
+      session: options.session,
+    } satisfies McpConnectorSettings,
   });
 }

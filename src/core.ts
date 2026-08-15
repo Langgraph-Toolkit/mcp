@@ -5,9 +5,12 @@ import {
 } from "@modelcontextprotocol/client";
 import type { Transport } from "@modelcontextprotocol/client";
 import type {
+  AgentRunOptions,
+  AgentTool,
   Actor,
   JsonObject,
   JsonValue,
+  ModelToolSpec,
   ToolDefinition,
   ValueSchema,
 } from "@langgraph-toolkit/core";
@@ -484,15 +487,32 @@ export interface McpConnectorOptions {
   readonly context?: McpRequestContext;
   /** Cache static-credential gateways; dynamic credential declarations are always request-scoped. */
   readonly cache?: "shared" | "none";
+  /** Application-level discovery and routing capabilities declared by the facade. */
+  readonly settings?: McpConnectorSettings;
+}
+
+/** Declarative MCP capabilities retained for agents, diagnostics, and host composition. */
+export interface McpConnectorSettings {
+  readonly discover?: boolean;
+  readonly discoverTools?: boolean;
+  readonly discoverResources?: boolean;
+  readonly discoverPrompts?: boolean;
+  readonly routing?: "semantic" | "explicit";
+  readonly permissions?: boolean;
+  readonly session?: boolean;
 }
 
 /** Cached MCP gateways and their lifecycle boundary for one host process. */
 export interface McpConnector {
   readonly client: MCPClient;
   readonly servers: McpServerRegistry;
+  /** Optional facade configuration. Low-level connectors may omit it. */
+  readonly settings?: McpConnectorSettings;
   readonly list: () => readonly string[];
   readonly server: (name: string, context?: McpRequestContext) => Promise<McpGateway>;
   readonly gateway: (name: string, context?: McpRequestContext) => Promise<McpGateway>;
+  /** Lazy discovery bridge consumed structurally by `createAgent({ tools: [mcp] })`. */
+  readonly bindTools?: (options?: AgentRunOptions) => Promise<readonly AgentTool[]>;
   readonly close: () => Promise<void>;
 }
 
@@ -505,6 +525,11 @@ function mergeRequestContext(base: McpRequestContext, next: McpRequestContext): 
     variables: { ...(base.variables ?? {}), ...(next.variables ?? {}) },
     global: { ...(base.global ?? {}), ...(next.global ?? {}) },
   };
+}
+
+function definedValues(values: Partial<JsonObject> | undefined): JsonObject | undefined {
+  if (values === undefined) return undefined;
+  return Object.fromEntries(Object.entries(values).filter((entry): entry is [string, JsonValue] => entry[1] !== undefined));
 }
 
 /**
@@ -577,12 +602,44 @@ export function createMcpConnector(options: McpConnectorOptions): McpConnector {
     },
   };
 
+  const bindTools = async (runOptions: AgentRunOptions = {}): Promise<readonly AgentTool[]> => {
+    if (options.settings?.discoverTools === false) return [];
+    const context: McpRequestContext = {
+      actor: runOptions.actor,
+      threadId: runOptions.threadId,
+      variables: definedValues(runOptions.variables),
+      global: definedValues(runOptions.global),
+    };
+    const tools: AgentTool[] = [];
+    for (const serverName of servers.list()) {
+      const current = await gateway(serverName, context);
+      for (const descriptor of await current.listTools()) {
+        const spec: ModelToolSpec = {
+          name: toModelToolName(serverName, descriptor.name),
+          description: descriptor.description,
+          parameters: descriptor.inputSchema,
+        };
+        tools.push({
+          spec,
+          execute: async (args: JsonObject) => {
+            const result = await current.callTool(descriptor.name, args);
+            if (result.isError) throw new McpError(`MCP tool "${descriptor.name}" returned an error.`, "MCP_TOOL_ERROR", serverName);
+            return result.structuredContent ?? result.content;
+          },
+        });
+      }
+    }
+    return tools;
+  };
+
   return {
     client,
     servers,
+    ...(options.settings === undefined ? {} : { settings: options.settings }),
     list: () => servers.list(),
     server: gateway,
     gateway,
+    bindTools,
     close: async () => {
       const connections = await Promise.allSettled([...gateways.values(), ...scopedGateways]);
       for (const connection of connections) {
@@ -592,4 +649,9 @@ export function createMcpConnector(options: McpConnectorOptions): McpConnector {
       scopedGateways.clear();
     },
   };
+}
+
+/** Map a server-local MCP name to a provider-safe model tool identifier. */
+function toModelToolName(server: string, tool: string): string {
+  return `${server}__${tool}`.replace(/[^a-zA-Z0-9_-]/g, "_");
 }

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   createMCP,
   createMCPAgent,
+  discoverMcpTools,
   McpError,
   fromMcpCredentials,
   fromMcpEnv,
@@ -18,7 +19,7 @@ import {
   type McpConnector,
   type McpGateway,
 } from "./advanced.js";
-import type { ChatMessage, ChatResult, LLMSession, JsonObject, JsonValue } from "@langgraph-toolkit/core";
+import { createToolRegistry, type ChatMessage, type ChatResult, type JsonObject, type JsonValue, type Model } from "@langgraph-toolkit/core";
 
 class FailingTransport implements Transport {
   onclose?: () => void;
@@ -168,6 +169,11 @@ describe("MCP declarations", () => {
       readResource: async (_uri: string): Promise<JsonValue> => null,
       close: async () => undefined,
     };
+    const declaredServers = new McpServerRegistry();
+    declaredServers.add({
+      name: "context",
+      transport: { kind: "custom", create: async () => new FailingTransport() },
+    });
     const fakeConnector: McpConnector = {
       client: {
         discover: async () => ({ servers: [] }),
@@ -177,31 +183,90 @@ describe("MCP declarations", () => {
         readResource: async <TValue extends JsonValue>(_uri: string): Promise<TValue> => await gateway.readResource("context://empty") as TValue,
         getPrompt: async <TInput extends object, TValue extends JsonValue>(_name: string, _input: TInput): Promise<TValue> => null as TValue,
       },
-      servers: new McpServerRegistry(),
+      servers: declaredServers,
       list: () => ["context"],
       server: async () => gateway,
       gateway: async () => gateway,
+      bindTools: async () => [{
+        spec: { name: "context.lookup", description: "Look up a value", parameters: { type: "object" } },
+        execute: async () => (await gateway.callTool("lookup", {})).content,
+      }],
       close: async () => undefined,
     };
-    const model: LLMSession = {
-      chat: async (messages: readonly ChatMessage[]): Promise<ChatResult> => {
+    const model: Model = {
+      name: "test-model",
+      generate: async (request): Promise<ChatResult> => {
+        const messages = request.messages;
         if (messages.some((message) => message.role === "tool")) return { content: "The value is ready." };
         return {
           content: "",
           toolCalls: [{ id: "call-1", name: "context.lookup", arguments: {} }],
         };
       },
+      async *stream(request) {
+        const result = await this.generate(request);
+        if (result.content) yield { type: "token", value: result.content };
+        for (const [index, call] of (result.toolCalls ?? []).entries()) {
+          yield { type: "tool_call", value: { id: call.id, index, name: call.name, arguments: JSON.stringify(call.arguments) } };
+        }
+      },
+      structured: <TValue extends object>() => ({ generate: async (): Promise<TValue> => ({} as TValue) }),
     };
 
     const agent = createMCPAgent({ model, mcp: fakeConnector });
     await expect(agent.discover()).resolves.toEqual([
       { name: "context.lookup", description: "Look up a value", parameters: { type: "object" } },
     ]);
-    await expect(agent.run([{ role: "user", content: "Check it" }])).resolves.toMatchObject({
-      message: { content: "The value is ready." },
-      rounds: 2,
-      toolCalls: [{ name: "context.lookup" }],
+    await expect(agent.run({ query: "Check it" })).resolves.toMatchObject({
+      output: { content: "The value is ready.", toolCalls: [{ name: "context.lookup" }] },
     });
+  });
+
+  it("caches static-credential schemas and preserves server-qualified MCP tools", async () => {
+    let discoveryCount = 0;
+    const gateway: McpGateway = {
+      server: "reference",
+      connect: async () => ({ lifecycle: "unknown", capabilities: {} }),
+      listTools: async () => {
+        discoveryCount += 1;
+        return [{ name: "lookup", description: "Look up a value", inputSchema: { type: "object" } }];
+      },
+      callTool: async () => ({ isError: false, content: { value: "ready" } }),
+      listResources: async () => [],
+      readResource: async (): Promise<JsonValue> => null,
+      close: async () => undefined,
+    };
+    const servers = new McpServerRegistry();
+    servers.add({ name: "reference", transport: { kind: "custom", create: async () => new FailingTransport() } });
+    const connector: McpConnector = {
+      client: {
+        discover: async () => ({ servers: [{ name: "reference", discovery: { lifecycle: "unknown", capabilities: {} }, tools: await gateway.listTools(), resources: [], prompts: [] }] }),
+        callTool: async <TArgs extends object, TResult extends JsonValue>(_name: string, _args: TArgs): Promise<TResult> => (await gateway.callTool("lookup", {})).content as TResult,
+        readResource: async <TValue extends JsonValue>(_uri: string): Promise<TValue> => null as TValue,
+        getPrompt: async <TInput extends object, TValue extends JsonValue>(_name: string, _input: TInput): Promise<TValue> => null as TValue,
+      },
+      servers,
+      list: () => ["reference"],
+      server: async () => gateway,
+      gateway: async () => gateway,
+      close: async () => undefined,
+    };
+    const model: Model = {
+      name: "test-model",
+      generate: async (): Promise<ChatResult> => ({ content: "ready" }),
+      async *stream() { yield { type: "token", value: "ready" }; },
+      structured: <TValue extends object>() => ({ generate: async (): Promise<TValue> => ({} as TValue) }),
+    };
+    const agent = createMCPAgent({ model, mcp: connector });
+
+    await agent.discover();
+    await agent.discover();
+    expect(discoveryCount).toBe(1);
+
+    const tools = await discoverMcpTools(connector);
+    const registry = createToolRegistry();
+    for (const tool of tools) registry.register(tool);
+    await expect(registry.execute("reference.lookup", {}, { threadId: "thread-1", runId: "run-1", variables: {}, global: {} })).resolves.toEqual({ value: "ready" });
   });
 
 });
