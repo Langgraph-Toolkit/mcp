@@ -1,5 +1,5 @@
 import type { JSONRPCMessage, Transport } from "@modelcontextprotocol/client";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createMCP,
   createMCPAgent,
@@ -10,6 +10,7 @@ import {
   useDatabase,
   useMCPServer,
   useStreamableHttp,
+  type McpRequestContext,
   type McpStringMap,
 } from "./index.js";
 import {
@@ -267,6 +268,74 @@ describe("MCP declarations", () => {
     const registry = createToolRegistry();
     for (const tool of tools) registry.register(tool);
     await expect(registry.execute("reference.lookup", {}, { threadId: "thread-1", runId: "run-1", variables: {}, global: {} })).resolves.toEqual({ value: "ready" });
+  });
+
+  it("binds provider-safe tool names while preserving request context and a cached gateway", async () => {
+    const contexts: McpRequestContext[] = [];
+    const calls: { readonly name: string; readonly args: JsonObject }[] = [];
+    const connector = createMcpConnector({
+      servers: [{ name: "db.production", transport: { kind: "custom", create: async () => new FailingTransport() } }],
+    });
+    const gateway: McpGateway = {
+      server: "db.production",
+      connect: async () => ({ lifecycle: "unknown", capabilities: {} }),
+      listTools: async () => [{ name: "schema.list", description: "List schemas", inputSchema: { type: "object" } }],
+      callTool: async (name, args) => {
+        calls.push({ name, args });
+        return { isError: false, content: { ready: true } };
+      },
+      listResources: async () => [],
+      readResource: async (): Promise<JsonValue> => null,
+      close: async () => undefined,
+    };
+    const connect = vi.spyOn(connector.servers, "connect").mockImplementation(async (_name, context = {}) => {
+      contexts.push(context);
+      return gateway;
+    });
+
+    try {
+      const runOptions = { threadId: "contract-thread", variables: { tenant: "alpha" }, global: { locale: "vi" } };
+      const tools = await connector.bindTools?.(runOptions);
+      expect(tools).toHaveLength(1);
+      const tool = tools?.[0];
+      if (!tool) throw new Error("Expected one bound MCP tool.");
+      expect(tool.spec.name).toBe("db_production__schema_list");
+      await expect(tool.execute({ includeHidden: false })).resolves.toEqual({ ready: true });
+      await connector.bindTools?.(runOptions);
+
+      expect(contexts).toEqual([{ threadId: "contract-thread", variables: { tenant: "alpha" }, global: { locale: "vi" } }]);
+      expect(calls).toEqual([{ name: "schema.list", args: { includeHidden: false } }]);
+      expect(connect).toHaveBeenCalledTimes(1);
+    } finally {
+      connect.mockRestore();
+      await connector.close();
+    }
+  });
+
+  it("preserves a stable MCP error when a bound tool reports a server error", async () => {
+    const connector = createMcpConnector({
+      servers: [{ name: "analytics", transport: { kind: "custom", create: async () => new FailingTransport() } }],
+    });
+    const gateway: McpGateway = {
+      server: "analytics",
+      connect: async () => ({ lifecycle: "unknown", capabilities: {} }),
+      listTools: async () => [{ name: "query", description: "Run a query", inputSchema: { type: "object" } }],
+      callTool: async () => ({ isError: true, content: { message: "server rejected query" } }),
+      listResources: async () => [],
+      readResource: async (): Promise<JsonValue> => null,
+      close: async () => undefined,
+    };
+    const connect = vi.spyOn(connector.servers, "connect").mockResolvedValue(gateway);
+
+    try {
+      const tools = await connector.bindTools?.();
+      const tool = tools?.[0];
+      if (!tool) throw new Error("Expected one bound MCP tool.");
+      await expect(tool.execute({})).rejects.toMatchObject({ name: "McpError", code: "MCP_TOOL_ERROR", server: "analytics" });
+    } finally {
+      connect.mockRestore();
+      await connector.close();
+    }
   });
 
 });
